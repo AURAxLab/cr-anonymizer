@@ -13,10 +13,26 @@ from .rules import (
     REGEX_PHONE,
     REGEX_EMAIL,
     REGEX_IP,
+    REGEX_DATE,
+    REGEX_COURT_CASE,
+    REGEX_CREDIT_CARD,
+    REGEX_AGE,
+    REGEX_FINANCIAL_MONEY,
     ANCHORS_HEALTH,
     ANCHORS_LEGAL,
     ANCHORS_CENSUS,
-    WHITELIST_ROLES
+    WHITELIST_ROLES,
+    HEALTH_DISEASES_DB,
+    HEALTH_MEDICINES_DB,
+    WHITELIST_PUBLIC_ENTITIES,
+    BELIEFS_RELIGIONS,
+    BELIEFS_POLITICAL_UNIONS,
+    ANCHORS_BIRTH,
+    ANCHORS_ADDRESS,
+    ANCHORS_DIRECTIONAL,
+    ANCHORS_METRIC,
+    ANCHORS_LANDMARK,
+    KEYWORDS_SINPE
 )
 
 @dataclass
@@ -64,6 +80,24 @@ class CRDetector:
                     subprocess.run([sys.executable, "-m", "spacy", "download", self.model_name], check=True)
                     return spacy.load(self.model_name)
 
+    def _normalize_text(self, txt: str) -> str:
+        import unicodedata
+        nfkd_form = unicodedata.normalize('NFKD', txt)
+        return "".join([c for c in nfkd_form if not unicodedata.combining(c)]).lower()
+
+    def _is_luhn_valid(self, digits: List[int]) -> bool:
+        if len(digits) < 13 or len(digits) > 19:
+            return False
+        checksum = 0
+        reverse_digits = digits[::-1]
+        for idx, digit in enumerate(reverse_digits):
+            if idx % 2 == 1:
+                doubled = digit * 2
+                checksum += doubled if doubled < 10 else doubled - 9
+            else:
+                checksum += digit
+        return checksum % 10 == 0
+
     def analyze(self, text: str) -> List[PIIFinding]:
         findings: List[PIIFinding] = []
         if not text:
@@ -80,10 +114,67 @@ class CRDetector:
         regex_findings.extend(self._detect_regex(text, REGEX_PHONE, "PHONE", SensitivityLevel.RESTRINGIDO, 0.95))
         regex_findings.extend(self._detect_regex(text, REGEX_EMAIL, "EMAIL", SensitivityLevel.RESTRINGIDO, 1.0))
         regex_findings.extend(self._detect_regex(text, REGEX_IP, "IP_ADDRESS", SensitivityLevel.RESTRINGIDO, 1.0))
+        regex_findings.extend(self._detect_regex(text, REGEX_COURT_CASE, "COURT_CASE", SensitivityLevel.RESTRINGIDO, 1.0))
+        regex_findings.extend(self._detect_regex(text, REGEX_AGE, "AGE", SensitivityLevel.RESTRINGIDO, 0.95))
         
-        # Detectamos Cédulas Jurídicas para ignorarlas o marcarlas como IRRESTRICTO
+        # Detectamos Cédulas Jurídicas para ignorarlas o marcarlas como Whitelist
         juridical_matches = self._detect_regex(text, REGEX_ID_JURIDICAL, "ID_JURIDICAL", SensitivityLevel.IRRESTRICTO, 1.0)
         regex_findings.extend(juridical_matches)
+
+        # Fechas y clasificación DoB (Fecha de Nacimiento)
+        date_findings = self._detect_regex(text, REGEX_DATE, "DATE", SensitivityLevel.IRRESTRICTO, 0.9)
+        birth_anchors_pattern = re.compile(
+            r'\b(?:nacimiento|nacer|nacido|nacida|natalicio|fec_nac|nacio)\b', 
+            re.IGNORECASE
+        )
+        for df in date_findings:
+            # Ventana de búsqueda de 30 caracteres antes de la fecha
+            window_start = max(0, df.start_char - 30)
+            preceding_text = text[window_start:df.start_char]
+            if birth_anchors_pattern.search(self._normalize_text(preceding_text)):
+                df.entity_type = "DATE_OF_BIRTH"
+                df.sensitivity_level = SensitivityLevel.RESTRINGIDO
+                df.confidence = 0.95
+            regex_findings.append(df)
+
+        # Tarjetas de crédito/débito con validación Luhn
+        cc_matches = self._detect_regex(text, REGEX_CREDIT_CARD, "CREDIT_CARD", SensitivityLevel.SENSIBLE, 1.0)
+        for cc in cc_matches:
+            digits = [int(c) for c in cc.value if c.isdigit()]
+            if self._is_luhn_valid(digits):
+                regex_findings.append(cc)
+
+        # Montos financieros
+        money_matches = self._detect_regex(text, REGEX_FINANCIAL_MONEY, "MONEY", SensitivityLevel.IRRESTRICTO, 0.9)
+        financial_anchors = re.compile(
+            r'\b(?:salario|ingresos|ingreso|pensión|pension|deuda|monto|quiebra|pobreza|pagar|pago|costo|precio)\b',
+            re.IGNORECASE
+        )
+        for mm in money_matches:
+            # Ventana de búsqueda de 35 caracteres a los lados del monto
+            window_start = max(0, mm.start_char - 35)
+            window_end = min(len(text), mm.end_char + 35)
+            surrounding = text[window_start:window_end]
+            if financial_anchors.search(self._normalize_text(surrounding)):
+                mm.entity_type = "FINANCIAL_STATUS"
+                mm.sensitivity_level = SensitivityLevel.SENSIBLE
+                mm.confidence = 0.9
+                regex_findings.append(mm)
+
+        # Clasificación SINPE Móvil
+        sinpe_keywords_pattern = re.compile(
+            r'\b(?:sinpe|pago móvil|pago movil|transferencia móvil|transferencia movil)\b', 
+            re.IGNORECASE
+        )
+        for rf in regex_findings:
+            if rf.entity_type == "PHONE":
+                window_start = max(0, rf.start_char - 25)
+                window_end = min(len(text), rf.end_char + 25)
+                surrounding = text[window_start:window_end]
+                if sinpe_keywords_pattern.search(self._normalize_text(surrounding)):
+                    rf.entity_type = "SINPE_NUMBER"
+                    rf.sensitivity_level = SensitivityLevel.RESTRINGIDO
+                    rf.confidence = 0.95
         
         findings.extend(regex_findings)
 
@@ -95,10 +186,32 @@ class CRDetector:
         context_findings = self._infer_sensitive_context(doc)
         findings.extend(context_findings)
 
-        # 4. --- RESOLUCIÓN FINAL DE TRASLAPES (CROSS-OVERLAP RESOLUTION) ---
+        # 4. --- CAPA DE BÚSQUEDA DIRECTA DE SALUD, CREENCIAS Y DIRECCIONES DESCRIPTIVAS ---
+        lookup_findings = self._detect_token_lookups_and_addresses(doc)
+        findings.extend(lookup_findings)
+
+        # 5. --- CAPA DE BÚSQUEDA DIRECTA POR PALABRAS CLAVE (Robustez extra) ---
+        direct_keyword_findings = self._detect_direct_keywords(text)
+        findings.extend(direct_keyword_findings)
+
+        # 6. --- RESOLUCIÓN FINAL DE TRASLAPES (CROSS-OVERLAP RESOLUTION) ---
         resolved_findings = self._resolve_overlaps(findings)
         
-        return resolved_findings
+        # 7. --- FILTRADO DE TELÉFONOS FALSOS DENTRO DE CREDIT_CARDS ---
+        cc_raw_spans = [match.span() for match in REGEX_CREDIT_CARD.finditer(text)]
+        final_findings = []
+        for f in resolved_findings:
+            if f.entity_type == "PHONE":
+                inside_cc = False
+                for start, end in cc_raw_spans:
+                    if f.start_char >= start and f.end_char <= end:
+                        inside_cc = True
+                        break
+                if inside_cc:
+                    continue
+            final_findings.append(f)
+            
+        return final_findings
 
     def _detect_regex(self, text: str, regex: re.Pattern, entity_type: str, level: SensitivityLevel, confidence: float) -> List[PIIFinding]:
         results = []
@@ -142,8 +255,12 @@ class CRDetector:
         honorifics_clean = {re.sub(r'[^\wÁÉÍÓÚÑa-záéíóúñ]', '', h).lower() for h in honorifics}
         title_modifiers_clean = {re.sub(r'[^\wÁÉÍÓÚÑa-záéíóúñ]', '', m).lower() for m in title_modifiers}
         
-        # Ignorar localizaciones generales para evitar falsos positivos de redacción
-        loc_ignore = {"costa rica", "cédula", "registro", "notaría", "tribunal", "provincia", "cantón", "distrito"}
+        # Ignorar localizaciones generales y palabras de transición comunes en español para evitar falsos positivos
+        loc_ignore = {
+            "costa rica", "cédula", "registro", "notaría", "tribunal", "provincia", 
+            "cantón", "distrito", "además", "ademas", "también", "tambien", 
+            "entonces", "como", "luego", "pero", "este", "esta", "ese", "esa", "aquel"
+        }
         
         # 1. Filtrar traslapes de expresiones regulares y localizaciones ignoradas antes de fusionar
         filtered_ents = []
@@ -195,19 +312,42 @@ class CRDetector:
                     start_context = max(0, ent.start_char - 50)
                     end_context = min(len(text), ent.end_char + 50)
                     context_snippet = text[start_context:end_context].replace('\n', ' ')
-                    ner_findings.append(PIIFinding(
-                        entity_type="ORGANIZATION",
-                        value=ent.text,
-                        start_char=ent.start_char,
-                        end_char=ent.end_char,
-                        sensitivity_level=SensitivityLevel.IRRESTRICTO,
-                        confidence=0.8,
-                        context=context_snippet
-                    ))
+                    
+                    # Lista Blanca de Transparencia de Entidades Públicas
+                    norm_ent_text = self._normalize_text(ent.text)
+                    is_public_entity = any(pub in norm_ent_text for pub in WHITELIST_PUBLIC_ENTITIES)
+                    
+                    if is_public_entity:
+                        ner_findings.append(PIIFinding(
+                            entity_type="PUBLIC_ENTITY",
+                            value=ent.text,
+                            start_char=ent.start_char,
+                            end_char=ent.end_char,
+                            sensitivity_level=SensitivityLevel.IRRESTRICTO,
+                            confidence=1.0,
+                            context=context_snippet
+                        ))
+                    else:
+                        ner_findings.append(PIIFinding(
+                            entity_type="ORGANIZATION",
+                            value=ent.text,
+                            start_char=ent.start_char,
+                            end_char=ent.end_char,
+                            sensitivity_level=SensitivityLevel.IRRESTRICTO,
+                            confidence=0.8,
+                            context=context_snippet
+                        ))
                     continue
 
             # B. Identificar si representa a una Persona
             is_person = ent.label_ == "PER"
+            
+            # Mitigación de Falsos Positivos de NLP: verbos conjugados al inicio de oración
+            # ej. "Realizó un pago" -> "Realizó" no es una persona.
+            first_token_pos = doc[ent.start_char // len(text) * len(doc)].pos_ if len(doc) > 0 else "NOUN"
+            if text_lower in ["realizó", "realizo", "declaró", "declaro", "ingresó", "ingreso", "presentó", "presento", "además", "ademas"]:
+                continue
+                
             matched_role = None
             
             # Analizar el contexto previo al token de la entidad (hasta 25 caracteres antes)
@@ -272,7 +412,7 @@ class CRDetector:
             
             if "paciente" in context_before or "paciente" in ent.text.lower():
                 is_person = True
-
+ 
             if is_person:
                 # Validar que no se trate de una enfermedad mal clasificada
                 if ent_clean_text.lower() in ["tuberculosis", "asma", "cáncer", "diabetes", "vih", "sida"]:
@@ -282,6 +422,13 @@ class CRDetector:
                 end_context = min(len(text), ent_end + 50)
                 context_snippet = text[start_context:end_context].replace('\n', ' ')
                 
+                # Check for judicial conflict roles in context before the name
+                judicial_roles_pattern = re.compile(
+                    r'\b(?:imputado|imputada|querellado|querellada|acusado|acusada|denunciado|denunciada|condenado|condenada|reo|víctima|victima)\b',
+                    re.IGNORECASE
+                )
+                is_judicial_role = judicial_roles_pattern.search(self._normalize_text(context_before))
+                
                 if matched_role:
                     ner_findings.append(PIIFinding(
                         entity_type="PUBLIC_OFFICIAL",
@@ -290,6 +437,16 @@ class CRDetector:
                         end_char=ent_end,
                         sensitivity_level=SensitivityLevel.IRRESTRICTO,
                         confidence=0.85,
+                        context=context_snippet
+                    ))
+                elif is_judicial_role:
+                    ner_findings.append(PIIFinding(
+                        entity_type="JUDICIAL_RECORD",
+                        value=ent_clean_text,
+                        start_char=ent_start,
+                        end_char=ent_end,
+                        sensitivity_level=SensitivityLevel.RESTRINGIDO,
+                        confidence=0.9,
                         context=context_snippet
                     ))
                 else:
@@ -309,15 +466,30 @@ class CRDetector:
                 start_context = max(0, ent.start_char - 50)
                 end_context = min(len(text), ent.end_char + 50)
                 context_snippet = text[start_context:end_context].replace('\n', ' ')
-                ner_findings.append(PIIFinding(
-                    entity_type="LOCATION",
-                    value=ent.text,
-                    start_char=ent.start_char,
-                    end_char=ent.end_char,
-                    sensitivity_level=SensitivityLevel.RESTRINGIDO,
-                    confidence=0.8,
-                    context=context_snippet
-                ))
+                
+                # Si la localización coincide con una entidad pública, clasificar como PUBLIC_ENTITY
+                norm_loc = self._normalize_text(ent.text)
+                is_public = any(pub in norm_loc for pub in WHITELIST_PUBLIC_ENTITIES)
+                if is_public:
+                    ner_findings.append(PIIFinding(
+                        entity_type="PUBLIC_ENTITY",
+                        value=ent.text,
+                        start_char=ent.start_char,
+                        end_char=ent.end_char,
+                        sensitivity_level=SensitivityLevel.IRRESTRICTO,
+                        confidence=1.0,
+                        context=context_snippet
+                    ))
+                else:
+                    ner_findings.append(PIIFinding(
+                        entity_type="LOCATION",
+                        value=ent.text,
+                        start_char=ent.start_char,
+                        end_char=ent.end_char,
+                        sensitivity_level=SensitivityLevel.RESTRINGIDO,
+                        confidence=0.8,
+                        context=context_snippet
+                    ))
 
         return ner_findings
 
@@ -464,6 +636,182 @@ class CRDetector:
             
         return results
 
+    def _detect_token_lookups_and_addresses(self, doc) -> List[PIIFinding]:
+        results = []
+        text = doc.text
+        i = 0
+        n_tokens = len(doc)
+        
+        while i < n_tokens:
+            token = doc[i]
+            token_norm = self._normalize_text(token.text)
+            token_lemma_norm = self._normalize_text(token.lemma_)
+            
+            # --- 1. DIRECCIONES DESCRIPTIVAS ("Señas") ---
+            if token_lemma_norm in ANCHORS_ADDRESS or token_norm in ANCHORS_ADDRESS:
+                j = i + 1
+                skipped = 0
+                while j < n_tokens and doc[j].pos_ in ["ADP", "DET", "CCONJ"] and skipped < 4:
+                    j += 1
+                    skipped += 1
+                
+                accumulated_tokens = []
+                allowed_pos = {"NOUN", "PROPN", "ADJ", "NUM", "ADP", "DET", "CCONJ"}
+                
+                while j < n_tokens and len(accumulated_tokens) < 15:
+                    tok = doc[j]
+                    if tok.text in [".", ";", "!", "?"] or "\n" in tok.text:
+                        break
+                    
+                    tok_norm = self._normalize_text(tok.text)
+                    if tok.pos_ in ["VERB", "AUX"] and tok_norm not in ANCHORS_LANDMARK:
+                        break
+                        
+                    if tok.pos_ in allowed_pos or tok_norm in ANCHORS_LANDMARK or tok_norm in ANCHORS_DIRECTIONAL:
+                        accumulated_tokens.append(tok)
+                        j += 1
+                    else:
+                        break
+                
+                if accumulated_tokens:
+                    while accumulated_tokens and accumulated_tokens[-1].pos_ in ["ADP", "CCONJ", "DET"]:
+                        accumulated_tokens.pop()
+                        
+                    if accumulated_tokens:
+                        start_char = accumulated_tokens[0].idx
+                        end_char = accumulated_tokens[-1].idx + len(accumulated_tokens[-1].text)
+                        addr_val = text[start_char:end_char]
+                        
+                        addr_norm = self._normalize_text(addr_val)
+                        has_directional = any(d in addr_norm for d in ANCHORS_DIRECTIONAL)
+                        has_metric = any(m in addr_norm for m in ANCHORS_METRIC)
+                        has_landmark = any(l in addr_norm for l in ANCHORS_LANDMARK)
+                        
+                        if has_directional or has_metric or has_landmark:
+                            start_context = max(0, start_char - 50)
+                            end_context = min(len(text), end_char + 50)
+                            context = text[start_context:end_context].replace('\n', ' ')
+                            results.append(PIIFinding(
+                                entity_type="RESIDENTIAL_ADDRESS",
+                                value=addr_val,
+                                start_char=start_char,
+                                end_char=end_char,
+                                sensitivity_level=SensitivityLevel.RESTRINGIDO,
+                                confidence=0.85,
+                                context=context
+                            ))
+                            i = j
+                            continue
+            i += 1
+            
+        return results
+
+    def _detect_direct_keywords(self, text: str) -> List[PIIFinding]:
+        # Búsqueda directa con expresiones regulares optimizadas para diccionarios estáticos
+        results = []
+        
+        # 1. Enfermedades (HEALTH_DIAGNOSIS)
+        diseases_pattern = re.compile(
+            rf"\b(?:{'|'.join(re.escape(d) for d in HEALTH_DISEASES_DB)})\b", 
+            re.IGNORECASE
+        )
+        for match in diseases_pattern.finditer(text):
+            start, end = match.span()
+            # Validar que no se trate de una palabra mal acentuada/slicing
+            val = match.group(0)
+            start_context = max(0, start - 50)
+            end_context = min(len(text), end + 50)
+            results.append(PIIFinding(
+                entity_type="HEALTH_DIAGNOSIS",
+                value=val,
+                start_char=start,
+                end_char=end,
+                sensitivity_level=SensitivityLevel.SENSIBLE,
+                confidence=0.95,
+                context=text[start_context:end_context].replace('\n', ' ')
+            ))
+
+        # 2. Medicamentos (HEALTH_TREATMENT)
+        medicines_pattern = re.compile(
+            rf"\b(?:{'|'.join(re.escape(m) for m in HEALTH_MEDICINES_DB)})\b", 
+            re.IGNORECASE
+        )
+        for match in medicines_pattern.finditer(text):
+            start, end = match.span()
+            val = match.group(0)
+            start_context = max(0, start - 50)
+            end_context = min(len(text), end + 50)
+            results.append(PIIFinding(
+                entity_type="HEALTH_TREATMENT",
+                value=val,
+                start_char=start,
+                end_char=end,
+                sensitivity_level=SensitivityLevel.SENSIBLE,
+                confidence=0.95,
+                context=text[start_context:end_context].replace('\n', ' ')
+            ))
+
+        # 3. Creencias Religiosas y Afiliaciones (SENSIBLE_BELIEFS)
+        religions_pattern = re.compile(
+            rf"\b(?:{'|'.join(re.escape(r) for r in BELIEFS_RELIGIONS)})\b", 
+            re.IGNORECASE
+        )
+        for match in religions_pattern.finditer(text):
+            start, end = match.span()
+            val = match.group(0)
+            start_context = max(0, start - 50)
+            end_context = min(len(text), end + 50)
+            results.append(PIIFinding(
+                entity_type="SENSIBLE_BELIEFS",
+                value=val,
+                start_char=start,
+                end_char=end,
+                sensitivity_level=SensitivityLevel.SENSIBLE,
+                confidence=0.9,
+                context=text[start_context:end_context].replace('\n', ' ')
+            ))
+
+        political_pattern = re.compile(
+            rf"\b(?:{'|'.join(re.escape(p) for p in BELIEFS_POLITICAL_UNIONS)})\b", 
+            re.IGNORECASE
+        )
+        for match in political_pattern.finditer(text):
+            start, end = match.span()
+            val = match.group(0)
+            start_context = max(0, start - 50)
+            end_context = min(len(text), end + 50)
+            results.append(PIIFinding(
+                entity_type="SENSIBLE_BELIEFS",
+                value=val,
+                start_char=start,
+                end_char=end,
+                sensitivity_level=SensitivityLevel.SENSIBLE,
+                confidence=0.9,
+                context=text[start_context:end_context].replace('\n', ' ')
+            ))
+
+        # 4. Entidades Públicas Whitelisted (PUBLIC_ENTITY)
+        public_entities_pattern = re.compile(
+            rf"\b(?:{'|'.join(re.escape(e) for e in WHITELIST_PUBLIC_ENTITIES)})\b", 
+            re.IGNORECASE
+        )
+        for match in public_entities_pattern.finditer(text):
+            start, end = match.span()
+            val = match.group(0)
+            start_context = max(0, start - 50)
+            end_context = min(len(text), end + 50)
+            results.append(PIIFinding(
+                entity_type="PUBLIC_ENTITY",
+                value=val,
+                start_char=start,
+                end_char=end,
+                sensitivity_level=SensitivityLevel.IRRESTRICTO,
+                confidence=1.0,
+                context=text[start_context:end_context].replace('\n', ' ')
+            ))
+
+        return results
+
     def _resolve_overlaps(self, findings: List[PIIFinding]) -> List[PIIFinding]:
         if not findings:
             return []
@@ -477,26 +825,36 @@ class CRDetector:
             for r in resolved:
                 if max(f.start_char, r.start_char) < min(f.end_char, r.end_char):
                     overlap = True
-                    # Si tienen exactamente las mismas coordenadas o se traslapan, decidir según tipo y confianza
                     # Priorizar el que tiene mayor especificidad
                     type_priority = {
                         "PUBLIC_OFFICIAL": 5,
-                        "HEALTH_DATA": 4,
+                        "HEALTH_DIAGNOSIS": 4,
+                        "HEALTH_TREATMENT": 4,
                         "FINANCIAL_STATUS": 4,
+                        "CREDIT_CARD": 4,
                         "ID_PHYSICAL": 3,
                         "ID_MIGRATORY": 3,
                         "IBAN": 3,
                         "EMAIL": 3,
                         "PHONE": 3,
+                        "SINPE_NUMBER": 3,
+                        "COURT_CASE": 3,
                         "MARITAL_STATUS": 3,
+                        "AGE": 3,
+                        "DATE_OF_BIRTH": 3,
+                        "SENSIBLE_BELIEFS": 3,
                         "NAME": 2,
+                        "JUDICIAL_RECORD": 2,
+                        "PUBLIC_ENTITY": 2,
+                        "ORGANIZATION": 2,
+                        "RESIDENTIAL_ADDRESS": 1,
                         "LOCATION": 1,
+                        "DATE": 1,
                         "DEMOGRAPHIC": 1
                     }
                     f_prio = type_priority.get(f.entity_type, 0)
                     r_prio = type_priority.get(r.entity_type, 0)
                     
-                    # Si f tiene mayor especificidad que r, reemplazamos r por f
                     if f_prio > r_prio:
                         resolved.remove(r)
                         resolved.append(f)
