@@ -104,3 +104,10 @@ print(texto_anonimo)
   * `anonymizer.py`: Helper para enmascaramiento inverso consistente.
 * `test_anonymizer.py`: Suite de validación de escenarios de Costa Rica.
 * `README.md`: Este archivo explicativo.
+
+---
+
+## ✍️ Autor y Licencia
+
+Este proyecto es propiedad y desarrollado por **Alexander Barquero**. Distribuido bajo la licencia **MIT** (consulte el archivo `LICENSE` para más información).
+
