@@ -36,7 +36,7 @@ REGEX_IP = re.compile(r'\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b')
 
 # Anclas para contextualizar y refinar el tipo de dato
 ANCHORS_HEALTH = [
-    "paciente", "diagnóstico", "sintomatología", "padece", "padece de", "sufre de",
+    "diagnóstico", "sintomatología", "padece", "padece de", "sufre de",
     "enfermedad", "diagnostica", "diagnosticado", "recetado", "medicamento",
     "tratamiento", "expediente clínico", "clínico", "síntomas", "patológico",
     "médico", "cirugía", "hospitalizado", "lesión", "patología"
