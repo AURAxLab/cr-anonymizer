@@ -76,5 +76,49 @@ def run_tests():
     ])
     print("\nTexto Anonimizado (Solo RESTRINGIDO - Mantiene Funcionario Público):\n", redacted_news)
 
+
+    # --- CASO DE PRUEBA 4: EXPEDIENTE JUDICIAL (Caso Penal de Tránsito / Querella) ---
+    print("\n\n>>> CASO DE PRUEBA 4: Expediente Judicial Penal")
+    judicial_text = (
+        "En el Tribunal Penal de Goicoechea, se tramita la querella contra el imputado Juan Manuel Santos, "
+        "con cédula de identidad 1-1234-5678, por el presunto delito de colisión y lesiones. "
+        "La víctima, la señora Ana Lorena Ruiz, declaró ante la Jueza instructora Dra. Patricia Vargas "
+        "y el fiscal penal Lic. Rodrigo Arias Brenes, señalando que el imputado huyó del lugar."
+    )
+    print("Texto Original:\n", judicial_text)
+    
+    findings_judicial = detector.analyze(judicial_text)
+    print("\nResultados de Detección (JSON):")
+    print(json.dumps([f.to_json() for f in findings_judicial], indent=2, ensure_ascii=False))
+    
+    # Redact both Restringido and Sensible (keeping public officials intact or redacting them according to options)
+    # Let's redact everything to see full protection
+    redacted_judicial = CRAnonymizer.anonymize(judicial_text, findings_judicial, redact_levels=[
+        SensitivityLevel.SENSIBLE,
+        SensitivityLevel.RESTRINGIDO,
+        SensitivityLevel.IRRESTRICTO
+    ])
+    print("\nTexto Anonimizado Completo (Expediente Judicial):\n", redacted_judicial)
+
+
+    # --- CASO DE PRUEBA 5: EDGES CASES DE IDENTIFICACIONES (Múltiples formatos de IDs) ---
+    print("\n\n>>> CASO DE PRUEBA 5: Formatos y Variaciones de Cédulas y DIMEX")
+    formats_text = (
+        "Para el registro de deudores, se verificaron los siguientes documentos de Costa Rica: "
+        "Cédula física con espacios 1 0987 0123, cédula física con guiones 5-0234-0567, "
+        "cédula física sin separación 203450987 y un DIMEX extranjero 155820102941."
+    )
+    print("Texto Original:\n", formats_text)
+    
+    findings_formats = detector.analyze(formats_text)
+    print("\nResultados de Detección (JSON):")
+    print(json.dumps([f.to_json() for f in findings_formats], indent=2, ensure_ascii=False))
+    
+    # Redact all IDs
+    redacted_formats = CRAnonymizer.anonymize(formats_text, findings_formats, redact_levels=[
+        SensitivityLevel.RESTRINGIDO
+    ])
+    print("\nTexto Anonimizado (Solo Cédulas/DIMEX):\n", redacted_formats)
+
 if __name__ == "__main__":
     run_tests()
