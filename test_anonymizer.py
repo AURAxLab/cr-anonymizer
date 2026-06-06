@@ -6,14 +6,14 @@ def run_tests():
     print(" INICIALIZANDO DETECTOR INTELIGENTE DE PII DE CR ")
     print("==================================================")
     
-    # We use 'sm' model for test speed, but it automatically downloads the lg model if requested
+    # We use 'sm' model for test speed
     detector = CRDetector(model_size="sm")
     
     # --- CASO DE PRUEBA 1: EXPEDIENTE MÉDICO (Sanatorio Durán) ---
     print("\n\n>>> CASO DE PRUEBA 1: Expediente Histórico del Sanatorio Durán")
     medical_text = (
         "Expediente Clínico N.º 2309-SD. El paciente Carlos Alvarado Gómez, vecino de Cartago, "
-        "con cédula física 1-0899-0234, ingresó presentando una sintomatología severa. "
+        "con cédula física 1-0899-0234, ingresó presenting una sintomatología severa. "
         "Tras los análisis clínicos y radiológicos, el Dr. Rafael Ángel Calderón Guardia confirma "
         "un diagnóstico de Tuberculosis pulmonar activa y ordena tratamiento inmediato. "
         "El paciente declara tener un salario de ₡350000 mensuales y no cuenta con seguro social."
@@ -24,7 +24,6 @@ def run_tests():
     print("\nResultados de Detección (JSON):")
     print(json.dumps([f.to_json() for f in findings], indent=2, ensure_ascii=False))
     
-    # Anonymize only SENSIBLE and RESTRINGIDO (keep IRRESTRICTO if needed, or redact all)
     redacted_med = CRAnonymizer.anonymize(medical_text, findings, redact_levels=[
         SensitivityLevel.SENSIBLE, 
         SensitivityLevel.RESTRINGIDO
@@ -47,7 +46,6 @@ def run_tests():
     print("\nResultados de Detección (JSON):")
     print(json.dumps([f.to_json() for f in findings_legal], indent=2, ensure_ascii=False))
     
-    # Redact all levels including IRRESTRICTO
     redacted_legal = CRAnonymizer.anonymize(legal_text, findings_legal, redact_levels=[
         SensitivityLevel.SENSIBLE, 
         SensitivityLevel.RESTRINGIDO,
@@ -70,12 +68,11 @@ def run_tests():
     print("\nResultados de Detección (JSON):")
     print(json.dumps([f.to_json() for f in findings_news], indent=2, ensure_ascii=False))
     
-    # Redact only Restringido (leaving public official names and public organization names intact)
     redacted_news = CRAnonymizer.anonymize(news_text, findings_news, redact_levels=[
         SensitivityLevel.RESTRINGIDO
     ])
     print("\nTexto Anonimizado (Solo RESTRINGIDO - Mantiene Funcionario Público):\n", redacted_news)
-
+ 
 
     # --- CASO DE PRUEBA 4: EXPEDIENTE JUDICIAL (Caso Penal de Tránsito / Querella) ---
     print("\n\n>>> CASO DE PRUEBA 4: Expediente Judicial Penal")
@@ -91,8 +88,6 @@ def run_tests():
     print("\nResultados de Detección (JSON):")
     print(json.dumps([f.to_json() for f in findings_judicial], indent=2, ensure_ascii=False))
     
-    # Redact both Restringido and Sensible (keeping public officials intact or redacting them according to options)
-    # Let's redact everything to see full protection
     redacted_judicial = CRAnonymizer.anonymize(judicial_text, findings_judicial, redact_levels=[
         SensitivityLevel.SENSIBLE,
         SensitivityLevel.RESTRINGIDO,
@@ -114,11 +109,94 @@ def run_tests():
     print("\nResultados de Detección (JSON):")
     print(json.dumps([f.to_json() for f in findings_formats], indent=2, ensure_ascii=False))
     
-    # Redact all IDs
     redacted_formats = CRAnonymizer.anonymize(formats_text, findings_formats, redact_levels=[
         SensitivityLevel.RESTRINGIDO
     ])
     print("\nTexto Anonimizado (Solo Cédulas/DIMEX):\n", redacted_formats)
+
+
+    # --- CASO DE PRUEBA 6: CARACTERÍSTICAS AVANZADAS (Fechas, DoB, Edad, Direcciones Descriptivas) ---
+    print("\n\n>>> CASO DE PRUEBA 6: Fechas de Nacimiento, Edades y Direcciones Descriptivas ('Señas')")
+    advanced_text = (
+        "El señor Carlos nació el 12 de octubre de 1980 en San José y tiene 45 años de edad. "
+        "El informe correspondiente se firmó el 5 de mayo del 2012. "
+        "Su dirección física registrada es: Heredia, del parque 200 metros norte y 50 metros este, "
+        "casa de portón negro, mano derecha."
+    )
+    print("Texto Original:\n", advanced_text)
+    
+    findings_adv = detector.analyze(advanced_text)
+    print("\nResultados de Detección (JSON):")
+    print(json.dumps([f.to_json() for f in findings_adv], indent=2, ensure_ascii=False))
+    
+    redacted_adv = CRAnonymizer.anonymize(advanced_text, findings_adv, redact_levels=[
+        SensitivityLevel.RESTRINGIDO,
+        SensitivityLevel.SENSIBLE
+    ])
+    print("\nTexto Anonimizado (Restringido + Sensible):\n", redacted_adv)
+
+
+    # --- CASO DE PRUEBA 7: SALUD AMPLIADA (Enfermedades y Medicamentos Comunes en CR) ---
+    print("\n\n>>> CASO DE PRUEBA 7: Diagnósticos y Tratamientos Médicos (Salud)")
+    health_text = (
+        "El paciente padece de diabetes tipo 2 y se le recetó metformina diaria. "
+        "En su expediente se detalla un diagnóstico previo de cáncer y neumonía. "
+        "Además, toma acetaminofén para controlar los síntomas de dolores generales."
+    )
+    print("Texto Original:\n", health_text)
+    
+    findings_health = detector.analyze(health_text)
+    print("\nResultados de Detección (JSON):")
+    print(json.dumps([f.to_json() for f in findings_health], indent=2, ensure_ascii=False))
+    
+    redacted_health = CRAnonymizer.anonymize(health_text, findings_health, redact_levels=[
+        SensitivityLevel.SENSIBLE
+    ])
+    print("\nTexto Anonimizado (Solo SENSIBLE):\n", redacted_health)
+
+
+    # --- CASO DE PRUEBA 8: FINANZAS Y SINPE MÓVIL (Luhn Check, SINPE y Salarios) ---
+    print("\n\n>>> CASO DE PRUEBA 8: Tarjetas de Crédito (Luhn), SINPE y Salario")
+    finance_text = (
+        "El cliente tiene un salario de ₡850000 mensuales. "
+        "Realizó un pago por SINPE al número 8888-8888 de la cuenta corriente. "
+        "Se registraron dos tarjetas para cobro: una Visa válida 4000-1234-5678-9017 y "
+        "una tarjeta inválida 1234-5678-9012-3456."
+    )
+    print("Texto Original:\n", finance_text)
+    
+    findings_finance = detector.analyze(finance_text)
+    print("\nResultados de Detección (JSON):")
+    print(json.dumps([f.to_json() for f in findings_finance], indent=2, ensure_ascii=False))
+    
+    redacted_finance = CRAnonymizer.anonymize(finance_text, findings_finance, redact_levels=[
+        SensitivityLevel.SENSIBLE,
+        SensitivityLevel.RESTRINGIDO
+    ])
+    print("\nTexto Anonimizado (Sensible + Restringido):\n", redacted_finance)
+
+
+    # --- CASO DE PRUEBA 9: CAUSAS JUDICIALES, CREENCIAS Y TRANSPARENCIA PÚBLICA ---
+    print("\n\n>>> CASO DE PRUEBA 9: Expediente Judicial Penal, Creencias y Lista Blanca")
+    judicial_adv_text = (
+        "Bajo el expediente de causa judicial número 20-000123-0042-PE del Poder Judicial, "
+        "se procesa al imputado Rodrigo Chaves por presunto delito contra la hacienda. "
+        "El expediente fue enviado a la Caja Costarricense de Seguro Social (CCSS) "
+        "por orden del Magistrado y el Notario Público. "
+        "El señor declaró en la comparecencia ser de convicción católico y miembro del sindicato APSE."
+    )
+    print("Texto Original:\n", judicial_adv_text)
+    
+    findings_jud_adv = detector.analyze(judicial_adv_text)
+    print("\nResultados de Detección (JSON):")
+    print(json.dumps([f.to_json() for f in findings_jud_adv], indent=2, ensure_ascii=False))
+    
+    redacted_jud_adv = CRAnonymizer.anonymize(judicial_adv_text, findings_jud_adv, redact_levels=[
+        SensitivityLevel.SENSIBLE,
+        SensitivityLevel.RESTRINGIDO,
+        SensitivityLevel.IRRESTRICTO
+    ])
+    print("\nTexto Anonimizado Completo:\n", redacted_jud_adv)
 
 if __name__ == "__main__":
     run_tests()
