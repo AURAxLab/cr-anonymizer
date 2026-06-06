@@ -40,7 +40,7 @@ class CRAnonymizer:
         person_count = 1
         
         for f in normal_findings:
-            if f.entity_type in ["NAME", "PUBLIC_OFFICIAL"]:
+            if f.entity_type in ["NAME", "PUBLIC_OFFICIAL", "JUDICIAL_RECORD"]:
                 if f.value not in person_map:
                     person_map[f.value] = f"[PERSONA_{person_count}]"
                     person_count += 1
@@ -52,7 +52,7 @@ class CRAnonymizer:
                 replacement = custom_replacer(f, person_count)
             else:
                 # Default replacements
-                if f.entity_type in ["NAME", "PUBLIC_OFFICIAL"] and f.value in person_map:
+                if f.entity_type in ["NAME", "PUBLIC_OFFICIAL", "JUDICIAL_RECORD"] and f.value in person_map:
                     replacement = person_map[f.value]
                 else:
                     replacement = f"[{f.entity_type}]"
