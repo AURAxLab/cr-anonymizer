@@ -137,11 +137,55 @@ class CRDetector:
         org_keywords = ["tribunal", "registro", "corporación", "sociedad", "ministerio", "s.a.", "limitada", "cooperativa", "municipalidad"]
         title_modifiers = ["pública", "público", "electoral", "supremo", "civil", "penal", "laboral", "de"]
         
+        # Limpieza de sets para búsquedas exactas sin puntuación
+        role_whitelist_clean = {re.sub(r'[^\wÁÉÍÓÚÑa-záéíóúñ]', '', r).lower() for r in role_whitelist}
+        honorifics_clean = {re.sub(r'[^\wÁÉÍÓÚÑa-záéíóúñ]', '', h).lower() for h in honorifics}
+        title_modifiers_clean = {re.sub(r'[^\wÁÉÍÓÚÑa-záéíóúñ]', '', m).lower() for m in title_modifiers}
+        
+        # Ignorar localizaciones generales para evitar falsos positivos de redacción
+        loc_ignore = {"costa rica", "cédula", "registro", "notaría", "tribunal", "provincia", "cantón", "distrito"}
+        
+        # 1. Filtrar traslapes de expresiones regulares y localizaciones ignoradas antes de fusionar
+        filtered_ents = []
         for ent in doc.ents:
-            # Evitar colisiones con regex existentes
             if self._is_overlapping(ent.start_char, ent.end_char, regex_findings):
                 continue
+            if ent.text.lower() in loc_ignore:
+                continue
+            filtered_ents.append(ent)
+            
+        # 2. Fusionar entidades SpaCy contiguas que representen nombres o cargos (separadas solo por espacio/puntuación)
+        merged_ents = []
+        i = 0
+        while i < len(filtered_ents):
+            ent = filtered_ents[i]
+            
+            while i + 1 < len(filtered_ents):
+                next_ent = filtered_ents[i + 1]
+                gap = text[ent.end_char:next_ent.start_char]
                 
+                # Si la brecha consiste únicamente en espacios o signos de puntuación menores
+                if re.match(r'^[\s,.:;]*$', gap):
+                    new_text = text[ent.start_char:next_ent.end_char]
+                    new_label = ent.label_ if ent.label_ == next_ent.label_ else "MISC"
+                    
+                    class MockEnt:
+                        def __init__(self, text, label, start_char, end_char):
+                            self.text = text
+                            self.label_ = label
+                            self.start_char = start_char
+                            self.end_char = end_char
+                            
+                    ent = MockEnt(new_text, new_label, ent.start_char, next_ent.end_char)
+                    i += 1
+                    continue
+                break
+                
+            merged_ents.append(ent)
+            i += 1
+        
+        # 3. Procesar las entidades (fusionadas o individuales)
+        for ent in merged_ents:
             text_lower = ent.text.lower()
             
             # A. Identificar si es una Organización / Institución Pública
@@ -175,13 +219,14 @@ class CRDetector:
             ent_start = ent.start_char + (len(ent.text) - len(ent_clean_text))
             ent_end = ent.end_char
             
-            # Buscar cargos y honoríficos dentro del propio texto de la entidad
+            # 1. Buscar cargos y honoríficos dentro del propio texto de la entidad
             for role in role_whitelist + honorifics:
                 pattern = re.compile(rf'\b{re.escape(role)}\b', re.IGNORECASE)
                 match = pattern.search(ent_clean_text)
                 if match:
                     is_person = True
-                    if role in role_whitelist:
+                    w_clean = re.sub(r'[^\wÁÉÍÓÚÑa-záéíóúñ]', '', role).lower()
+                    if w_clean in role_whitelist_clean:
                         matched_role = role
                     
                     # Si el rol/honorífico está al principio, limpiar prefijo y adjetivos de cargo
@@ -195,7 +240,7 @@ class CRDetector:
                         stripping = True
                         for w in words:
                             w_clean = re.sub(r'[^\wÁÉÍÓÚÑa-záéíóúñ]', '', w).lower()
-                            if stripping and (w_clean in role_whitelist or w_clean in honorifics or w_clean in title_modifiers or not w[0].isupper()):
+                            if stripping and (w_clean in role_whitelist_clean or w_clean in honorifics_clean or w_clean in title_modifiers_clean or not w[0].isupper()):
                                 continue
                             else:
                                 stripping = False
@@ -210,19 +255,23 @@ class CRDetector:
                                 ent_end = ent_start + len(name_part)
                     break
             
-            # Verificar roles u honoríficos en el contexto previo
-            if not is_person:
-                for role in role_whitelist:
-                    if re.search(r'\b' + re.escape(role) + r'\b', context_before):
-                        is_person = True
-                        matched_role = role
-                        break
-                for hon in honorifics:
-                    if re.search(r'\b' + re.escape(hon) + r'\b', context_before):
-                        is_person = True
-                        break
-                if "paciente" in context_before:
+            # 2. Verificar roles u honoríficos en el contexto previo
+            for role in role_whitelist:
+                pattern = re.compile(rf'\b{re.escape(role)}\b', re.IGNORECASE)
+                if pattern.search(context_before):
                     is_person = True
+                    matched_role = role
+                    break
+            
+            if not matched_role:
+                for hon in honorifics:
+                    pattern = re.compile(rf'\b{re.escape(hon)}\b', re.IGNORECASE)
+                    if pattern.search(context_before):
+                        is_person = True
+                        break
+            
+            if "paciente" in context_before or "paciente" in ent.text.lower():
+                is_person = True
 
             if is_person:
                 # Validar que no se trate de una enfermedad mal clasificada
